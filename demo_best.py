@@ -167,7 +167,7 @@ def find_model(arg):
             return path
         raise FileNotFoundError(f"Model not found: {path}")
 
-    for candidate in ["checkpoints/best/best_model.zip", "pendulum_final.zip"]:
+    for candidate in ["pendulum_final.zip", "checkpoints/best/best_model.zip"]:
         if os.path.exists(candidate):
             return candidate
 
