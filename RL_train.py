@@ -301,13 +301,19 @@ def train():
         verbose=1,
     )
 
-    latest   = "checkpoints/best/best_model.zip"
-    resuming = os.path.exists(latest)
-
-    if resuming:
-        print(f"  Resuming from {latest}\n")
-        model = SAC.load(latest, env=train_env)
+    latest_best = "checkpoints/best/best_model.zip"
+    final_fallback = "pendulum_final.zip"
+    
+    if os.path.exists(latest_best):
+        print(f"  Resuming from {latest_best}\n")
+        model = SAC.load(latest_best, env=train_env)
+        resuming = True
+    elif os.path.exists(final_fallback):
+        print(f"  Recovery mode: Loading from {final_fallback}\n")
+        model = SAC.load(final_fallback, env=train_env)
+        resuming = True
     else:
+        resuming = False
         model = SAC(                                                 # [3]
             "MlpPolicy",
             train_env,
@@ -327,7 +333,7 @@ def train():
     t0 = time.perf_counter()
 
     model.learn(
-        total_timesteps=20_000_000,   # Overnight training
+        total_timesteps=23_000_000,   # Recovery training
         callback=CallbackList([checkpoint_cb, eval_cb]),
         reset_num_timesteps=not resuming,
     )
