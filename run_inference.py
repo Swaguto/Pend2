@@ -5,14 +5,14 @@ from Hardware_Env import HardwarePendulumEnv
 
 def run_inference():
     MODEL_PATH = "pendulum_final.zip"
-    SERIAL_PORT = "COM3" # CHANGE THIS to your port
+    SERIAL_PORT = "COM5"  # CHANGE THIS to your port
     
     print(f"Loading model: {MODEL_PATH}")
     model = SAC.load(MODEL_PATH)
     
     print(f"Connecting to hardware on {SERIAL_PORT}...")
     try:
-        env = HardwarePendulumEnv(serial_port=SERIAL_PORT)
+        env = HardwarePendulumEnv(port=SERIAL_PORT)
     except Exception as e:
         print(f"Error: {e}")
         return
