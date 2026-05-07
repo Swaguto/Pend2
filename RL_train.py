@@ -137,6 +137,13 @@ class PendulumEnv(gym.Env):
             useFixedBase=True,
             physicsClientId=self._cid,
         )
+        
+        # Fetch base masses for Domain Randomization
+        cart_info = p.getDynamicsInfo(self.robot, self.cart_idx, physicsClientId=self._cid)
+        pend_info = p.getDynamicsInfo(self.robot, self.pend_idx, physicsClientId=self._cid)
+        self.base_cart_mass = cart_info[0]
+        self.base_pend_mass = pend_info[0]
+
         # Preserve URDF damping — it's physically correct, don't zero it
         self._disable_motors()
 
@@ -160,6 +167,17 @@ class PendulumEnv(gym.Env):
         self._speed = 0.0
         self._cart_vel_ema = 0.0
         self._pend_vel_ema = 0.0
+
+        # ── Domain Randomization ──────────────────────────────────────────────
+        # Randomize mass by +/- 15%
+        cart_mass = self.base_cart_mass * np.random.uniform(0.85, 1.15)
+        pend_mass = self.base_pend_mass * np.random.uniform(0.85, 1.15)
+        p.changeDynamics(self.robot, self.cart_idx, mass=cart_mass, physicsClientId=self._cid)
+        p.changeDynamics(self.robot, self.pend_idx, mass=pend_mass, physicsClientId=self._cid)
+
+        # Randomize friction/damping of the rail and pivot
+        p.changeDynamics(self.robot, self.cart_idx, linearDamping=np.random.uniform(0.0, 0.1), physicsClientId=self._cid)
+        p.changeDynamics(self.robot, self.pend_idx, jointDamping=np.random.uniform(0.0, 0.02), physicsClientId=self._cid)
 
         # Cart near the physical rail centre (rail is NOT symmetric around 0)
         p.resetJointState(
@@ -192,6 +210,10 @@ class PendulumEnv(gym.Env):
         cart_vel   = states[0][1]
         pole_angle = states[1][0]
         pole_vel   = states[1][1]
+
+        # ── Domain Randomization (Sensor Noise) ───────────────────────────────
+        cart_vel += np.random.normal(0.0, 0.05)
+        pole_vel += np.random.normal(0.0, 0.1)
 
         # ── Angle convention correction ───────────────────────────────────────
         # This URDF: theta=0 = hanging, theta=pi = upright
