@@ -83,8 +83,11 @@ class PendulumEnv(gym.Env):
     CART_MARGIN =  0.02
 
     # ── Actuation ─────────────────────────────────────────────────────────────
-    # Bumped to 20 N — short rail needs decisive moves to build swing momentum
-    MAX_FORCE   = 20.0
+    # Matched to hardware settings
+    ACCEL_SCALE      = 400_000.0   # steps / s²
+    MAX_SPEED        = 4000.0      # steps/sec
+    COUNTS_PER_METER = 40290.0
+    EMA_ALPHA        = 0.35
 
     # ── Episode ───────────────────────────────────────────────────────────────
     MAX_STEPS   = 1000
@@ -116,6 +119,10 @@ class PendulumEnv(gym.Env):
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(5,), dtype=np.float32)
 
+        self._speed = 0.0
+        self._cart_vel_ema = 0.0
+        self._pend_vel_ema = 0.0
+
         self._build_world()   # [1a] build once, never again in reset()
 
     def _build_world(self):
@@ -135,15 +142,14 @@ class PendulumEnv(gym.Env):
 
     def _disable_motors(self):
         """
-        Kill PyBullet's default velocity-control holding force on both joints.
-        Must be called after EVERY resetJointState() — it silently re-enables them.
+        Kill PyBullet's default velocity-control holding force on the pendulum joint.
+        The cart joint will be explicitly controlled via velocity commands.
         """
-        for joint in (self.cart_idx, self.pend_idx):
-            p.setJointMotorControl2(
-                self.robot, joint,
-                p.VELOCITY_CONTROL, force=0,
-                physicsClientId=self._cid,
-            )
+        p.setJointMotorControl2(
+            self.robot, self.pend_idx,
+            p.VELOCITY_CONTROL, force=0,
+            physicsClientId=self._cid,
+        )
 
     # ── Gym API ───────────────────────────────────────────────────────────────
 
@@ -151,6 +157,9 @@ class PendulumEnv(gym.Env):
         if seed is not None:
             np.random.seed(seed)
         self._step_count = 0
+        self._speed = 0.0
+        self._cart_vel_ema = 0.0
+        self._pend_vel_ema = 0.0
 
         # Cart near the physical rail centre (rail is NOT symmetric around 0)
         p.resetJointState(
@@ -193,23 +202,35 @@ class PendulumEnv(gym.Env):
         # to keep it hanging (the wrong goal).
         shifted = pole_angle - np.pi
 
+        # ── EMA Smoothing ─────────────────────────────────────────────────────
+        self._cart_vel_ema = (self.EMA_ALPHA * cart_vel + (1.0 - self.EMA_ALPHA) * self._cart_vel_ema)
+        self._pend_vel_ema = (self.EMA_ALPHA * pole_vel + (1.0 - self.EMA_ALPHA) * self._pend_vel_ema)
+
         return np.array([
             (cart_pos - self.CART_CENTRE) / self.CART_RANGE,
-            cart_vel  / 2.0,
+            self._cart_vel_ema  / 2.0,
             np.cos(shifted),   # +1 upright, -1 hanging
             np.sin(shifted),   # encodes which side it's falling toward
-            pole_vel  / 10.0,
+            self._pend_vel_ema  / 10.0,
         ], dtype=np.float32)
 
     def step(self, action):
         self._step_count += 1
 
-        # Force applied to CART joint (idx 3) - pendulum (idx 7) is passive
-        cart_force = float(action[0]) * self.MAX_FORCE
+        # Integrate action into target stepper motor speed
+        dt = float(self.CTRL_SKIP) / self.SIM_HZ
+        self._speed -= float(action[0]) * self.ACCEL_SCALE * dt
+        self._speed = float(np.clip(self._speed, -self.MAX_SPEED, self.MAX_SPEED))
+
+        # Convert steps/sec to m/s for PyBullet
+        target_vel_m_s = self._speed / self.COUNTS_PER_METER
+
+        # Apply to PyBullet using VELOCITY_CONTROL (matching hardware stepper motor)
         p.setJointMotorControl2(
             self.robot, self.cart_idx,
-            p.TORQUE_CONTROL,
-            force=cart_force,
+            p.VELOCITY_CONTROL,
+            targetVelocity=target_vel_m_s,
+            force=200.0,  # Max force the simulated motor can use to hit target velocity
             physicsClientId=self._cid,
         )
 
@@ -240,7 +261,7 @@ class PendulumEnv(gym.Env):
         cart_penalty   = -1.5 * cart_pos_norm ** 2
 
         # 5. Action penalty: discourages wasteful oscillation
-        action_penalty = -0.001 * (cart_force / self.MAX_FORCE) ** 2
+        action_penalty = -0.001 * float(action[0]) ** 2
 
         reward = (height_reward + upright_bonus + vel_penalty
                   + cart_penalty + action_penalty)
