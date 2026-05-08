@@ -120,8 +120,6 @@ class PendulumEnv(gym.Env):
             low=-np.inf, high=np.inf, shape=(5,), dtype=np.float32)
 
         self._speed = 0.0
-        self._cart_vel_ema = 0.0
-        self._pend_vel_ema = 0.0
 
         self._build_world()   # [1a] build once, never again in reset()
 
@@ -165,8 +163,6 @@ class PendulumEnv(gym.Env):
             np.random.seed(seed)
         self._step_count = 0
         self._speed = 0.0
-        self._cart_vel_ema = 0.0
-        self._pend_vel_ema = 0.0
 
         # ── Domain Randomization ──────────────────────────────────────────────
         # Randomize mass by +/- 15%
@@ -211,10 +207,6 @@ class PendulumEnv(gym.Env):
         pole_angle = states[1][0]
         pole_vel   = states[1][1]
 
-        # ── Domain Randomization (Sensor Noise) ───────────────────────────────
-        cart_vel += np.random.normal(0.0, 0.05)
-        pole_vel += np.random.normal(0.0, 0.1)
-
         # ── Angle convention correction ───────────────────────────────────────
         # This URDF: theta=0 = hanging, theta=pi = upright
         # Subtract pi so the network sees:
@@ -224,16 +216,12 @@ class PendulumEnv(gym.Env):
         # to keep it hanging (the wrong goal).
         shifted = pole_angle - np.pi
 
-        # ── EMA Smoothing ─────────────────────────────────────────────────────
-        self._cart_vel_ema = (self.EMA_ALPHA * cart_vel + (1.0 - self.EMA_ALPHA) * self._cart_vel_ema)
-        self._pend_vel_ema = (self.EMA_ALPHA * pole_vel + (1.0 - self.EMA_ALPHA) * self._pend_vel_ema)
-
         return np.array([
             (cart_pos - self.CART_CENTRE) / self.CART_RANGE,
-            self._cart_vel_ema  / 2.0,
+            cart_vel  / 2.0,
             np.cos(shifted),   # +1 upright, -1 hanging
             np.sin(shifted),   # encodes which side it's falling toward
-            self._pend_vel_ema  / 10.0,
+            pole_vel  / 10.0,
         ], dtype=np.float32)
 
     def step(self, action):
