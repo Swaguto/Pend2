@@ -244,15 +244,69 @@ class HardwarePendulumEnv(gym.Env):
         self._last_obs = obs
         return obs
 
+    def _auto_home(self):
+        print("\n" + "=" * 52)
+        print("  AUTO-HOMING INITIATED")
+        print("  Keep hands clear of the rail!")
+        print("=" * 52)
+
+        # 1. Find Left Limit
+        print("  [1/4] Finding left physical limit...")
+        self._send("V-800.0\n")
+        time.sleep(0.5)
+        
+        while True:
+            _, c1 = self._read_latest()
+            time.sleep(0.2)
+            _, c2 = self._read_latest()
+            if abs(c2 - c1) < 10:
+                break # Stalled!
+                
+        left_limit = c2
+        print(f"        Left limit found: {left_limit}")
+        
+        # 2. Find Right Limit
+        print("  [2/4] Finding right physical limit...")
+        self._send("V800.0\n")
+        time.sleep(0.5)
+        
+        while True:
+            _, c1 = self._read_latest()
+            time.sleep(0.2)
+            _, c2 = self._read_latest()
+            if abs(c2 - c1) < 10:
+                break # Stalled!
+                
+        right_limit = c2
+        print(f"        Right limit found: {right_limit}")
+        
+        # 3. Calculate Center and Drive There
+        center = (left_limit + right_limit) // 2
+        print(f"  [3/4] Calculated center: {center}. Moving to center...")
+        
+        self._send("V-800.0\n")
+        while True:
+            _, c = self._read_latest()
+            if c <= center:
+                break
+                
+        self._send("V0.0\n")
+        
+        # 4. Prompt for Pendulum Zeroing
+        print("  [4/4] Cart centered!")
+        print("\n  Let the pendulum hang STRAIGHT DOWN.")
+        input("  Press Enter when ready ...")
+
     # ── Gym API ───────────────────────────────────────────────────────────────
 
     def reset(self, seed=None, options=None):
         """
-        Manual calibration sequence:
-          1. Slide cart to the physical CENTRE of the rail.
-          2. Let the pendulum hang STRAIGHT DOWN.
-          3. Press Enter.
-          → Arduino zeros both encoders here via 'Z' command.
+        Auto calibration sequence:
+          1. Drives cart left until physical stall.
+          2. Drives cart right until physical stall.
+          3. Calculates center and drives there.
+          4. Prompts user to hang pendulum down.
+          5. Arduino zeros both encoders here via 'Z' command.
           → RL takes control immediately.
         """
         super().reset(seed=seed)
@@ -265,12 +319,7 @@ class HardwarePendulumEnv(gym.Env):
         time.sleep(0.05)
         self.ser.reset_input_buffer()
 
-        print("\n" + "=" * 52)
-        print("  CALIBRATION")
-        print("  1. Slide the cart to the CENTRE of the rail.")
-        print("  2. Let the pendulum hang STRAIGHT DOWN.")
-        print("=" * 52)
-        input("  Press Enter when ready ...")
+        self._auto_home()
 
         # Zero both encoders at this exact position
         self._send("Z\n")

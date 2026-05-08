@@ -52,6 +52,7 @@ volatile long cart_ticks = 0;
 
 float         target_velocity = 0.0;
 unsigned long last_report_ms  = 0;
+bool          homed           = false;
 
 AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);
 
@@ -121,6 +122,7 @@ void loop() {
       cart_ticks = 0;
       interrupts();
       target_velocity = 0.0;
+      homed = true;
     }
     else {
       Serial.read();  // discard unknown bytes
@@ -129,7 +131,7 @@ void loop() {
 
   // 2. Safety limit check — just stop, no disable (no EN pin)
   long c = readCart();
-  if (abs(c) > SAFE_LIMIT_TICKS) {
+  if (homed && abs(c) > SAFE_LIMIT_TICKS) {
     target_velocity = 0.0;
     stepper.setSpeed(0);
     stepper.runSpeed();
