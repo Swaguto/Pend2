@@ -183,12 +183,37 @@ class PendulumEnv(gym.Env):
             physicsClientId=self._cid,
         )
 
-        # ── Start HANGING: θ≈0 in this URDF ──────────────────────────────────
-        # Small random kick breaks symmetry so the agent explores both directions
+        # ── Mixed Initialization ──────────────────────────────────────────────
+        # PROBLEM: Always starting from hanging means 99% of training steps are
+        #   spent swinging. The agent briefly touches the upright zone but never
+        #   gets enough gradient signal to learn fine balancing corrections.
+        #
+        # FIX: 70% of episodes start near the top (balance drilling), 30% start
+        #   from hanging (swing-up practice). The agent learns both skills in the
+        #   same training run — no separate scripts needed.
+        #
+        # Ratios to tune:
+        #   More balance trouble  → increase BALANCE_FRAC toward 0.85
+        #   Losing swing-up skill → decrease BALANCE_FRAC toward 0.50
+        BALANCE_FRAC = 0.70
+
+        if np.random.random() < BALANCE_FRAC:
+            # ── Near-upright: balance drilling ────────────────────────────────
+            # theta=pi is upright in this URDF. Random scatter within ±0.35 rad
+            # (~20°) so the agent practices recovering from realistic perturbations.
+            init_angle = np.pi + np.random.uniform(-0.35, 0.35)
+            # Give it a small random velocity so it learns to decelerate AND hold.
+            init_vel   = np.random.uniform(-1.5, 1.5)
+        else:
+            # ── Hanging: swing-up practice ────────────────────────────────────
+            # Small random kick breaks symmetry so the agent explores both directions.
+            init_angle = np.random.uniform(-0.15, 0.15)
+            init_vel   = np.random.uniform(-0.3, 0.3)
+
         p.resetJointState(
             self.robot, self.pend_idx,
-            targetValue=np.random.uniform(-0.15, 0.15),
-            targetVelocity=np.random.uniform(-0.3, 0.3),
+            targetValue=init_angle,
+            targetVelocity=init_vel,
             physicsClientId=self._cid,
         )
 
@@ -371,8 +396,8 @@ def train():
 
     elapsed = time.perf_counter() - t0
     print(f"\n  Done in {elapsed:.0f}s ({elapsed / 60:.1f} min)")
-    model.save("pendulum_final")
-    print("  Saved -> pendulum_final.zip")
+    model.save("pendulum_mixed_init")
+    print("  Saved -> pendulum_mixed_init.zip")
 
     train_env.close()
     eval_env.close()

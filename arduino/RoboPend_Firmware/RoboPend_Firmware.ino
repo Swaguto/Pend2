@@ -43,7 +43,7 @@ const int DIR_PIN  = 10;  // DIR
 
 // ── Configuration ────────────────────────────────────────────
 const long  SAFE_LIMIT_TICKS = 14000;  // half of 29000 rail, minus margin
-const float MAX_SPEED_STEPS  = 4000.0; // steps/sec
+const float MAX_SPEED_STEPS  = 2000.0; // steps/sec
 const int   REPORT_PERIOD_MS = 10;     // 100 Hz telemetry
 
 // ── State ────────────────────────────────────────────────────

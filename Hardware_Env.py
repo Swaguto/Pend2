@@ -42,9 +42,8 @@ import gymnasium as gym
 
 # ── Physical constants ────────────────────────────────────────────────────────
 
-PEND_CPR         = 2400.0      # encoder counts per full revolution
-                               # (600 PPR × 4 quadrature edges)
-                               # hanging = 0, upright = 1200
+PEND_CPR         = 1200.0      # encoder counts per full revolution
+                               # hanging = 0, upright = 600
 
 COUNTS_PER_METER = 40290.0     # cart encoder counts per metre
                                # measured: 4029 counts / 10 cm
@@ -59,30 +58,61 @@ CART_RANGE_M     = RAIL_HALF_COUNTS / COUNTS_PER_METER  # ≈ 0.360 m
 CART_VEL_DENOM   = 2.0
 PEND_VEL_DENOM   = 10.0
 
-MAX_SPEED        = 4000.0      # steps/sec — must match firmware setMaxSpeed()
+MAX_SPEED        = 3000.0      # steps/sec — must match firmware setMaxSpeed()
 
-# ── Sensor Trim ───────────────────────────────────────────────────────────────
-# If the cart balances but slowly drifts to the RIGHT, increase this (e.g., +0.02)
-# If the cart balances but slowly drifts to the LEFT, decrease this  (e.g., -0.02)
-ANGLE_TRIM       = 0.02         # radians
+# ── Sensor Trim ──────────────────────────────────────────────────────────────
+# Fine-tune this if the pendulum encoder reads slightly off when truly vertical.
+# Positive = rotate the zero point clockwise, negative = counter-clockwise.
+# Start at 0.0 and adjust in steps of ~0.05 rad if the policy drifts at the top.
+ANGLE_TRIM       = 0.0         # radians — added to shifted angle in _build_obs
 
-# ── Action → velocity integration ────────────────────────────────────────────
-# The sim applies force (N) to a cart with inertia.
-# On hardware we command velocity directly, so we integrate:
-#   speed += action × ACCEL_SCALE × dt
-# ACCEL_SCALE is the single tuning knob:
-#   too low  → can't build swing momentum
-#   too high → violent oscillation, can't balance
-# Start here, increase by 50_000 if swing-up is too weak.
-ACCEL_SCALE      = 400_000.0   # steps / s²
+# ── 3-Zone Gain Scheduler ────────────────────────────────────────────────────
+# The pendulum needs different control gains in different zones:
+#
+#   ZONE 1  Swing-Up   (cos < 0.0)  Pendulum is hanging or mid-swing.
+#             Use gentle moderate gain so the cart pumps energy smoothly
+#             without the motor stalling or overshooting.
+#
+#   ZONE 2  Transition  (0.0 → 0.85) Pendulum rising toward vertical.
+#             Gain ramps up linearly so there's no sudden jerk at the
+#             zone boundary. This is what bridges swing-up and balance.
+#
+#   ZONE 3  Balance    (cos > 0.85) Within ~32° of vertical.
+#             Maximum gain for fast, decisive micro-corrections.
+#             This is what actually holds the pendulum upright.
+#
+# Tune SWING_SCALE and BALANCE_SCALE independently:
+#   SWING_SCALE   too high → violent swing / motor stalls
+#   BALANCE_SCALE too low  → pendulum falls before cart catches it
+SWING_SCALE    = 110_000.0   # steps / s²  — swing-up zone gain
+BALANCE_SCALE  = 420_000.0   # steps / s²  — balance zone gain (your ACCEL×BOOST)
+
+def _effective_scale(cos_theta: float) -> float:
+    """Return the interpolated ACCEL_SCALE for the current pendulum angle."""
+    if cos_theta <= 0.0:
+        # Zone 1: pure swing-up
+        return SWING_SCALE
+    elif cos_theta >= 0.85:
+        # Zone 3: pure balance
+        return BALANCE_SCALE
+    else:
+        # Zone 2: linear ramp between swing and balance gains
+        t = cos_theta / 0.85          # 0.0 at horizontal, 1.0 at balance entry
+        return SWING_SCALE + t * (BALANCE_SCALE - SWING_SCALE)
+# When the pendulum is within ~30° of vertical (cos_theta > 0.85), multiply
+# the action by this factor so the cart responds MORE aggressively to small
+# balancing corrections. This compensates for the sim-to-real gap where
+# hardware inertia/friction eats into the model's commanded force.
+# 1.0 = no boost, 2.0 = double strength near the top.
+BALANCE_BOOST    = 2.0
 
 # ── Velocity smoothing ────────────────────────────────────────────────────────
 # Exponential moving average applied to finite-differenced velocities.
 # 0 = fully smoothed (very slow to respond), 1 = no smoothing (noisy).
-EMA_ALPHA        = 0.35
+EMA_ALPHA        = 1.0
 
 # ── Serial ────────────────────────────────────────────────────────────────────
-DEFAULT_PORT     = "COM5"
+DEFAULT_PORT     = "COM3"
 BAUD             = 115200
 
 
@@ -133,6 +163,7 @@ class HardwarePendulumEnv(gym.Env):
         self._last_obs     = np.zeros(5, dtype=np.float32)
 
         self._step_count   = 0
+        self._is_homed     = False
 
         self._connect()
 
@@ -210,7 +241,7 @@ class HardwarePendulumEnv(gym.Env):
         # CART_CENTRE = 0 by construction → no subtraction needed
 
         # ── Pendulum angle ────────────────────────────────────────────────
-        # 0 counts = hanging (θ=0), 1200 counts = upright (θ=π)
+        # 0 counts = hanging (θ=0), 600 counts = upright (θ=π)
         pend_angle    = pend_cnt * (2.0 * np.pi / PEND_CPR)   # radians
         shifted       = pend_angle - np.pi + ANGLE_TRIM       # 0=upright
         cos_theta     = float(np.cos(shifted))   # +1 upright, −1 hanging
@@ -319,7 +350,22 @@ class HardwarePendulumEnv(gym.Env):
         time.sleep(0.05)
         self.ser.reset_input_buffer()
 
-        self._auto_home()
+        if not self._is_homed:
+            self._auto_home()
+            self._is_homed = True
+        else:
+            print("\n  [Reset] Returning to center...")
+            while True:
+                _, c = self._read_latest()
+                if abs(c) < 50:
+                    break
+                # Drive back towards 0
+                speed = -np.sign(c) * 800.0
+                self._send(f"V{speed}\n")
+                time.sleep(0.05)
+            self._send("V0.0\n")
+            print("  Let the pendulum hang STRAIGHT DOWN.")
+            input("  Press Enter when ready ...")
 
         # Zero both encoders at this exact position
         self._send("Z\n")
@@ -345,10 +391,10 @@ class HardwarePendulumEnv(gym.Env):
         now = time.perf_counter()
         dt  = max(now - self._prev_t, 1e-4)
 
-        # ── Integrate force → velocity ────────────────────────────────────
-        # INVERTED: If the cart runs away to one side, the motor direction
-        # is backwards relative to the encoder. We subtract instead of add.
-        self._speed -= float(action[0]) * ACCEL_SCALE * dt
+        # ── 3-Zone gain-scheduled velocity integration ────────────────────────
+        last_cos   = float(self._last_obs[2])          # cos_theta from last step
+        scale      = _effective_scale(last_cos)        # zone-based gain
+        self._speed += float(action[0]) * scale * dt
         self._speed  = float(np.clip(self._speed, -MAX_SPEED, MAX_SPEED))
         self._send(f"V{self._speed:.1f}\n")
 
@@ -383,7 +429,7 @@ class HardwarePendulumEnv(gym.Env):
         # The policy MUST be free to swing from hanging, just like in training.
         hit_rail   = abs(cart_pos_norm) > 1.0
         terminated = bool(hit_rail)
-        truncated  = bool(self._step_count >= 1000)
+        truncated  = bool(self._step_count >= 100000)
 
         if terminated:
             self._speed = 0.0

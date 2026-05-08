@@ -4,11 +4,28 @@ from stable_baselines3 import SAC
 from Hardware_Env import HardwarePendulumEnv
 
 def run_inference():
-    MODEL_PATH = "pendulum_final.zip"
-    SERIAL_PORT = "COM5"  # CHANGE THIS to your port
-    
-    print(f"Loading model: {MODEL_PATH}")
-    model = SAC.load(MODEL_PATH)
+    BASE_MODEL   = "pendulum_final.zip"       # clean architecture
+    HW_MODEL     = "pendulum_hardware_tuned.zip"  # fine-tuned weights
+    SERIAL_PORT  = "COM3"
+
+    # Load the clean base model first (avoids ent_coef corruption crash)
+    print(f"Loading base model: {BASE_MODEL}")
+    model = SAC.load(BASE_MODEL)
+
+    # If a hardware-tuned model exists, transplant its policy weights
+    import os, zipfile, torch, io
+    if os.path.exists(HW_MODEL):
+        print(f"Applying hardware-tuned weights from: {HW_MODEL}")
+        try:
+            with zipfile.ZipFile(HW_MODEL, 'r') as zf:
+                with zf.open('policy.pth') as f:
+                    weights = torch.load(io.BytesIO(f.read()), map_location='cpu')
+            model.policy.load_state_dict(weights, strict=False)
+            print("  Hardware weights applied OK!")
+        except Exception as e:
+            print(f"  Could not apply hardware weights ({e}) — using base model.")
+    else:
+        print(f"  No hardware model found — using base model.")
     
     print(f"Connecting to hardware on {SERIAL_PORT}...")
     try:
